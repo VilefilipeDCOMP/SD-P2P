@@ -78,7 +78,7 @@ def seed(sock, file_dir):
         conn.close()
         print(f"[Seed] Conexão com {addr} encerrada")
 
-def receive_chunk(block_id):
+def receive_chunk(sock, block_id):
     cabecalho = json.dumps({"op": "GET_BLOCK","block_id": block_id})
     cabecalho = cabecalho.encode("UTF-8")
     prefixo = len(cabecalho).to_bytes(4, "big")
@@ -111,7 +111,7 @@ def peer(sock, id_peer):
     print(f"[Peer {id_peer}] iniciado")
 
     sock.connect((IP_ADDRESS, 9011))
-    (block_id, bloco_recebido) = receive_chunk(0)
+    (block_id, bloco_recebido) = receive_chunk(sock, 0)
     
     chunks[block_id] = bloco_recebido
 
@@ -136,7 +136,7 @@ def peer(sock, id_peer):
 
     while True:
         conn, addr = sock_servidor.accept()
-        print(f"[Seed] Conexão recebida de {addr}")
+        print(f"[Peer {id_peer}] Conexão recebida de {addr}")
     
         prefixo_recebido = recv_exact(conn, 4)
         tamanho_json = int.from_bytes(prefixo_recebido, "big")
@@ -151,9 +151,9 @@ def peer(sock, id_peer):
                 block_id = data.get("block_id")
 
                 if type(block_id) is not int:
-                    print("[Seed] block_id deve ser um inteiro.")
-                elif not ((block_id >= 0) and (block_id <= (len(chunks) - 1))):
-                    print("[Seed] block_id inválido para arquivo desejado.")
+                    print("[Peer {id_peer}] block_id deve ser um inteiro.")
+                elif block_id not in chunks:
+                    print("[Peer {id_peer}] block_id inválido para arquivo desejado.")
                 else:
                     bloco = chunks[block_id]
 
@@ -166,7 +166,7 @@ def peer(sock, id_peer):
                     conn.sendall(bloco)
 
         conn.close()
-        print(f"[Seed] Conexão com {addr} encerrada")
+        print(f"[Peer {id_peer}] Conexão com {addr} encerrada")
 
 def peer_novo(sock, id_peer):
     chunks = {}
@@ -175,10 +175,10 @@ def peer_novo(sock, id_peer):
     print(f"[Peer {id_peer}] iniciado")
 
     sock.connect((IP_ADDRESS, 9012))
-    (block_id, bloco_recebido) = receive_chunk(0)
+    (block_id, bloco_recebido) = receive_chunk(sock, 0)
 
     print(bloco_recebido)
-    # chunks[block_id] = bloco_recebido 
+    chunks[block_id] = bloco_recebido 
 
     
     
