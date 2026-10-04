@@ -2,6 +2,7 @@ import sys
 import os
 import socket
 import json
+import threading
 
 IP_ADDRESS = "127.0.0.1"
 CHUNK_SIZE = 262144
@@ -32,6 +33,8 @@ def seed(sock, file_dir):
         print(f"Erro: O arquivo '{file_dir}' não existe")
         exit(1)
     print(f"[Seed] Compartilhando o arquivo: {file_dir}")
+
+    file_size = os.path.getsize(file_dir)
 
     chunks = []
 
@@ -74,11 +77,19 @@ def seed(sock, file_dir):
                     conn.sendall(prefixo)
                     conn.sendall(cabecalho)
                     conn.sendall(bloco)
+            case "GET_METADADOS":
+                cabecalho = json.dumps({"status": "ok", "file_size": file_size, "block_size": CHUNK_SIZE, "num_chunks": len(chunks)})
+                cabecalho = cabecalho.encode("UTF-8")
+                prefixo = len(cabecalho).to_bytes(4, "big")
+
+                conn.sendall(prefixo)
+                conn.sendall(cabecalho)
+
 
         conn.close()
         print(f"[Seed] Conexão com {addr} encerrada")
 
-def receive_chunk(sock, block_id):
+def peer_receive_chunk(sock, block_id):
     cabecalho = json.dumps({"op": "GET_BLOCK","block_id": block_id})
     cabecalho = cabecalho.encode("UTF-8")
     prefixo = len(cabecalho).to_bytes(4, "big")
@@ -94,27 +105,38 @@ def receive_chunk(sock, block_id):
     ## Cabeçalho
     cabecalho_bytes = recv_exact(sock, tamanho_json)
     cabecalho_recebido = json.loads(cabecalho_bytes.decode("UTF-8"))
-    print(cabecalho_recebido)
     block_id_recebido = cabecalho_recebido.get("block_id")
 
     ## Bloco
     bloco_recebido = recv_exact(sock, cabecalho_recebido.get("size"))
-    print(len(bloco_recebido))
 
     return (block_id_recebido, bloco_recebido)
-    
 
-def peer(sock, id_peer):
-    chunks = {}
-    
-    ## CLIENTE
-    print(f"[Peer {id_peer}] iniciado")
+def peer_receive_meta(sock):
+    cabecalho = json.dumps({"op": "GET_METADADOS"})
+    cabecalho = cabecalho.encode("UTF-8")
+    prefixo = len(cabecalho).to_bytes(4, "big")
 
-    sock.connect((IP_ADDRESS, 9011))
-    (block_id, bloco_recebido) = receive_chunk(sock, 0)
-    
-    chunks[block_id] = bloco_recebido
+    sock.sendall(prefixo)
+    sock.sendall(cabecalho)
 
+    ## Recebimento
+    ## Prefixo
+    prefixo_recebido = recv_exact(sock, 4)
+    tamanho_json = int.from_bytes(prefixo_recebido, "big")
+
+    ## Cabeçalho
+    cabecalho_bytes = recv_exact(sock, tamanho_json)
+    cabecalho_recebido = json.loads(cabecalho_bytes.decode("UTF-8"))
+
+
+    file_size = cabecalho_recebido.get("file_size")
+    block_size = cabecalho_recebido.get("block_size")
+    num_chunks = cabecalho_recebido.get("num_chunks")
+
+    return (file_size, block_size, num_chunks)
+
+def peer_server(chunks, chunks_lock, id_peer):
     ## SERVIDOR
     sock_servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock_servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -151,11 +173,12 @@ def peer(sock, id_peer):
                 block_id = data.get("block_id")
 
                 if type(block_id) is not int:
-                    print("[Peer {id_peer}] block_id deve ser um inteiro.")
+                    print(f"[Peer {id_peer}] block_id deve ser um inteiro.")
                 elif block_id not in chunks:
-                    print("[Peer {id_peer}] block_id inválido para arquivo desejado.")
+                    print(f"[Peer {id_peer}] block_id inválido para arquivo desejado.")
                 else:
-                    bloco = chunks[block_id]
+                    with chunks_lock:
+                        bloco = chunks.get(block_id)
 
                     cabecalho = json.dumps({"status": "ok", "block_id": block_id, "size": len(bloco)})
                     cabecalho = cabecalho.encode("UTF-8")
@@ -167,6 +190,36 @@ def peer(sock, id_peer):
 
         conn.close()
         print(f"[Peer {id_peer}] Conexão com {addr} encerrada")
+    
+def peer(sock, id_peer):
+    chunks = {}
+    chunks_lock = threading.Lock()
+
+    thread_servidor = threading.Thread(target=peer_server, args=(chunks, chunks_lock, id_peer))
+    thread_servidor.start()
+    
+    ## CLIENTE
+    print(f"[Peer {id_peer}] iniciado")
+
+    sock.connect((IP_ADDRESS, 9011))
+
+    (file_size, block_size, num_chunks) = peer_receive_meta(sock)
+    print(file_size, block_size, num_chunks)
+
+    sock.close()
+
+    for i in range(0, num_chunks):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock_bloco:
+            sock_bloco.connect((IP_ADDRESS, 9011))
+
+            block_id, bloco_recebido = peer_receive_chunk(sock_bloco, i)
+
+            with chunks_lock:
+                chunks[block_id] = bloco_recebido
+
+    print(f"[Peer {id_peer}] Arquivo baixado!")
+
+
 
 def peer_novo(sock, id_peer):
     chunks = {}
@@ -175,9 +228,9 @@ def peer_novo(sock, id_peer):
     print(f"[Peer {id_peer}] iniciado")
 
     sock.connect((IP_ADDRESS, 9012))
-    (block_id, bloco_recebido) = receive_chunk(sock, 0)
+    block_id, bloco_recebido = peer_receive_chunk(sock, 5)
 
-    print(bloco_recebido)
+    print(block_id, len(bloco_recebido))
     chunks[block_id] = bloco_recebido 
 
     
