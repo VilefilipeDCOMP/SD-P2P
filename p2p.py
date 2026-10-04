@@ -3,6 +3,8 @@ import os
 import socket
 import json
 import threading
+import random
+import time
 
 IP_ADDRESS = "127.0.0.1"
 CHUNK_SIZE = 262144
@@ -20,7 +22,32 @@ def recv_exact(sock, numero_exato_bytes):
 
     return dados_recebido
 
-def seed(sock, file_dir):
+def send_msg(sock: socket.socket, resposta: dict):
+    cabecalho = json.dumps(resposta)
+    cabecalho = cabecalho.encode("UTF-8")
+    prefixo = len(cabecalho).to_bytes(4, "big")
+
+    sock.sendall(prefixo)
+    sock.sendall(cabecalho)
+
+def receive_msg(sock: socket.socket):
+    ## Prefixo
+    prefixo_recebido = recv_exact(sock, 4)
+    tamanho_json = int.from_bytes(prefixo_recebido, "big")
+
+    ## Cabeçalho
+    cabecalho_bytes = recv_exact(sock, tamanho_json)
+    cabecalho_recebido = json.loads(cabecalho_bytes.decode("UTF-8"))
+
+    ## Bloco
+    bloco_recebido = None
+    
+    if "size" in cabecalho_recebido:
+        bloco_recebido = recv_exact(sock, cabecalho_recebido["size"])
+
+    return (prefixo_recebido, cabecalho_recebido, bloco_recebido)
+
+def seed(sock: socket.socket, file_dir):
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((IP_ADDRESS, 9011))
     sock.listen(5)
@@ -46,6 +73,32 @@ def seed(sock, file_dir):
             chunks.append(chunk)
 
     print(f"[Seed] Arquivo '{file_dir}' lido com sucesso. Tamanho: {len(chunks)} chunks.")
+
+    ## CONEXÃO COM TRACKER
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock_tracker:
+        sock_tracker.connect((IP_ADDRESS, 9010)) ## Conecta ao Tracker
+
+        send_msg(sock_tracker, {"op": "REGISTER" , "peer_id": "seed", "port_peer": 9011})
+        (prefixo_recebido, cabecalho_recebido, _) = receive_msg(sock_tracker)
+
+        if cabecalho_recebido.get("status") != "ok":
+            print("[Seed] Não foi possível registrar no tracker")
+            exit(1)
+
+        print("[Seed] Registrado no tracker!")
+
+    for i in range(0, len(chunks)):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock_tracker:
+            sock_tracker.connect((IP_ADDRESS, 9010))
+
+            send_msg(sock_tracker, {"op": "HAVE" , "peer_id": "seed", "block_id": i})
+            (prefixo_recebido, cabecalho_recebido, _) = receive_msg(sock_tracker)
+
+            if cabecalho_recebido.get("status") != "ok":
+                print("[Seed] Não foi possível registrar o bloco no tracker")
+                exit(1)
+
+    print("[Seed] Chunks registrados no tracker!")
 
     while True:
         conn, addr = sock.accept()
@@ -89,13 +142,8 @@ def seed(sock, file_dir):
         conn.close()
         print(f"[Seed] Conexão com {addr} encerrada")
 
-def peer_receive_chunk(sock, block_id):
-    cabecalho = json.dumps({"op": "GET_BLOCK","block_id": block_id})
-    cabecalho = cabecalho.encode("UTF-8")
-    prefixo = len(cabecalho).to_bytes(4, "big")
-
-    sock.sendall(prefixo)
-    sock.sendall(cabecalho)
+def peer_receive_chunk(sock: socket.socket, block_id):
+    send_msg(sock, {"op": "GET_BLOCK","block_id": block_id})
 
     ## Recebimento
     ## Prefixo
@@ -112,7 +160,7 @@ def peer_receive_chunk(sock, block_id):
 
     return (block_id_recebido, bloco_recebido)
 
-def peer_receive_meta(sock):
+def peer_receive_meta(sock: socket.socket):
     cabecalho = json.dumps({"op": "GET_METADADOS"})
     cabecalho = cabecalho.encode("UTF-8")
     prefixo = len(cabecalho).to_bytes(4, "big")
@@ -191,7 +239,7 @@ def peer_server(chunks, chunks_lock, id_peer):
         conn.close()
         print(f"[Peer {id_peer}] Conexão com {addr} encerrada")
     
-def peer(sock, id_peer):
+def peer(sock: socket.socket, id_peer):
     chunks = {}
     chunks_lock = threading.Lock()
 
@@ -201,40 +249,212 @@ def peer(sock, id_peer):
     ## CLIENTE
     print(f"[Peer {id_peer}] iniciado")
 
-    sock.connect((IP_ADDRESS, 9011))
+    sock_tracker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock_tracker.connect((IP_ADDRESS, 9010)) ## Conecta ao Tracker
 
-    (file_size, block_size, num_chunks) = peer_receive_meta(sock)
-    print(file_size, block_size, num_chunks)
+    mapeamento_peer = {
+        "1": 9012,
+        "2": 9013,
+        "3": 9014,
+        "4": 9015,
+    }
 
-    sock.close()
+    port_peer = mapeamento_peer.get(id_peer) 
+
+    send_msg(sock_tracker, {"op": "REGISTER" , "peer_id": id_peer, "port_peer": port_peer})
+    (prefixo_recebido, cabecalho_recebido, _) = receive_msg(sock_tracker)
+
+    if cabecalho_recebido.get("status") != "ok":
+        print(f"[Peer {id_peer}] Não foi possível registrar o bloco no tracker")
+        exit(1)
+
+    sock_tracker.close()
+    print(f"[Peer {id_peer}] Registrado no tracker!")
+
+    ## OBTEM OS METADADOS DO SEED
+    sock_seed = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock_seed.connect((IP_ADDRESS, 9011))
+
+    (file_size, block_size, num_chunks) = peer_receive_meta(sock_seed)
+    # print(file_size, block_size, num_chunks)
+
+    sock_seed.close()
 
     for i in range(0, num_chunks):
+        while True:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock_tracker:
+                sock_tracker.connect((IP_ADDRESS, 9010)) ## Conecta ao Tracker
+
+                send_msg(sock_tracker, {"op": "GET_OWNERS", "peer_id": id_peer, "block_id": i})
+                (_, cabecalho_recebido, _) = receive_msg(sock_tracker)
+
+            if cabecalho_recebido.get("status") != "ok":
+                print(f"[Peer {id_peer}] Não foi possível obter a listagem de todos seeders do chunk {i}")
+                exit(1)
+
+            ## Para que o Seed não seja escolhido tanto assim.
+            seeders_lista = cabecalho_recebido.get("owners", [])
+            seeders_lista = [
+                dono for dono in seeders_lista
+                if dono["peer_id"] != id_peer
+            ]
+
+            outros_peers = [
+                dono for dono in seeders_lista
+                if dono["peer_id"] != "seed"
+            ]
+
+            candidatos = outros_peers or seeders_lista
+
+            if candidatos:
+                break
+
+            print(f"[Peer {id_peer}] Aguardando um dono do bloco {i}")
+            time.sleep(0.5)
+
+        seeder_escolhido = random.choice(candidatos)
+
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock_bloco:
-            sock_bloco.connect((IP_ADDRESS, 9011))
+            sock_bloco.connect((seeder_escolhido["ip"], seeder_escolhido.get("port")))
 
             block_id, bloco_recebido = peer_receive_chunk(sock_bloco, i)
 
-            with chunks_lock:
-                chunks[block_id] = bloco_recebido
+        with chunks_lock:
+            chunks[block_id] = bloco_recebido
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock_tracker:
+            sock_tracker.connect((IP_ADDRESS, 9010)) ## Conecta ao Tracker
+
+            send_msg(sock_tracker, {"op": "HAVE" , "peer_id": id_peer, "block_id": block_id})
+            (_, cabecalho_recebido, _) = receive_msg(sock_tracker)
+
+            if cabecalho_recebido.get("status") != "ok":
+                print("[Seed] Não foi possível registrar o bloco no tracker")
+                exit(1)
+
+        print(
+            f"[Peer {id_peer}] Bloco {block_id} recebido de "
+            f"{seeder_escolhido['peer_id']}"
+        )
 
     print(f"[Peer {id_peer}] Arquivo baixado!")
 
-
-
-def peer_novo(sock, id_peer):
-    chunks = {}
+def peer_novo(sock: socket.socket, id_peer):
+    # chunks = {}
     
-    ## CLIENTE
-    print(f"[Peer {id_peer}] iniciado")
+    # ## CLIENTE
+    # print(f"[Peer {id_peer}] iniciado")
 
-    sock.connect((IP_ADDRESS, 9012))
-    block_id, bloco_recebido = peer_receive_chunk(sock, 5)
+    # sock.connect((IP_ADDRESS, 9012))
+    # block_id, bloco_recebido = peer_receive_chunk(sock, 5)
 
-    print(block_id, len(bloco_recebido))
-    chunks[block_id] = bloco_recebido 
+    # print(block_id, len(bloco_recebido))
+    # chunks[block_id] = bloco_recebido 
 
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as teste:
+        teste.connect((IP_ADDRESS, 9010))
+        send_msg(teste, {"op": "GET_OWNERS", "peer_id": "1", "block_id": 0})
+        _, resposta, _ = receive_msg(teste)
+        print(resposta)
+
+def tracker(sock: socket.socket):
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((IP_ADDRESS, 9010))
+    sock.listen(5)
     
-    
+    print("[Tracker] iniciado")
+
+    registro_peer = {}
+
+    while True:
+        conn, addr = sock.accept()
+        print(f"[Tracker] Conexão recebida de {addr}")
+
+        prefixo_recebido = recv_exact(conn, 4)
+        tamanho_json = int.from_bytes(prefixo_recebido, "big")
+
+        cabecalho_bytes = recv_exact(conn, tamanho_json)
+        data = json.loads(cabecalho_bytes.decode("UTF-8"))
+
+        op = data.get("op")
+
+        match op:
+            case "REGISTER":
+                peer_id = data.get("peer_id")
+                port_peer = data.get("port_peer")
+
+                if peer_id in registro_peer:
+                    print("ERRO: Peer já cadastrado.")
+
+                    resposta = {"status": "erro"}
+                else:
+                    registro_peer[peer_id] = {"ip": addr[0], "port": port_peer, "blocos": []}
+
+                    resposta = {"status": "ok"}
+
+                cabecalho = json.dumps(resposta)
+                cabecalho = cabecalho.encode("UTF-8")
+                prefixo = len(cabecalho).to_bytes(4, "big")
+
+                conn.sendall(prefixo)
+                conn.sendall(cabecalho)
+
+
+            case "HAVE":
+                peer_id = data.get("peer_id")
+                block_id = data.get("block_id")
+
+                if type(block_id) is not int or block_id < 0:
+                    print("ERRO: block_id inválido.")
+                    resposta = {"status": "erro"}
+                elif peer_id not in registro_peer:
+                    print("ERRO: peer não cadastrado.")
+                    resposta = {"status": "erro"}
+                else:
+                    blocos = registro_peer[peer_id].setdefault("blocos", [])
+
+                    if block_id not in blocos:
+                        blocos.append(block_id)
+
+                    resposta = {"status": "ok"}
+                    
+
+                cabecalho = json.dumps(resposta)
+                cabecalho = cabecalho.encode("UTF-8")
+                prefixo = len(cabecalho).to_bytes(4, "big")
+
+                conn.sendall(prefixo)
+                conn.sendall(cabecalho)
+
+            case "GET_OWNERS":
+                peer_id = data.get("peer_id")
+                block_id = data.get("block_id")
+
+                if type(block_id) is not int or block_id < 0:
+                    print("ERRO: block_id inválido.")
+                    resposta = {"status": "erro"}
+                else:
+                    owners = []
+
+                    for id_cadastrado, registro in registro_peer.items():
+                        if id_cadastrado == peer_id:
+                            continue
+
+                        if block_id in registro.get("blocos", []):
+                            owners.append({
+                                "peer_id": id_cadastrado,
+                                "ip": registro["ip"],
+                                "port": registro["port"]
+                            })
+
+                    resposta = {"status": "ok", "owners": owners}
+
+                cabecalho = json.dumps(resposta)
+                cabecalho = cabecalho.encode("UTF-8")
+                prefixo = len(cabecalho).to_bytes(4, "big")
+
+                conn.sendall(prefixo)
+                conn.sendall(cabecalho)
 
 if "__main__" == __name__:
     argv = sys.argv[1:]
@@ -263,5 +483,9 @@ if "__main__" == __name__:
             exit(1)
         else:
             peer_novo(sock, sys.argv[2])
+    elif argv[0] == "--tracker":
+        tracker(sock)
+
+    
 
     
