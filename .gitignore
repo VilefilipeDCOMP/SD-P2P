@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Regenere localmente com: python gerar_arquivos.py
+arquivos/*.bin

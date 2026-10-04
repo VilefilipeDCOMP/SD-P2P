@@ -1,0 +1,57 @@
+services:
+  servidor-v1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: sd-servidor-v1
+
+    command: python servidor_v1.py
+
+    ports:
+      - "9001:9001"
+
+    volumes:
+      - ./arquivos:/app/arquivos:ro   #arquivos usados para simulação são pegos desse diretório
+
+    restart: unless-stopped
+
+    # max-size e max-file evitam que logs de longa duração encham o disco
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    networks:
+      - sd-network
+
+  servidor-v2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: sd-servidor-v2
+
+    command: python servidor_v2.py
+
+    ports:
+      - "9002:9002"
+
+    volumes:
+      - ./arquivos:/app/arquivos:ro
+
+    restart: unless-stopped
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    networks:
+      - sd-network
+
+networks:
+  sd-network:
+    driver: bridge
