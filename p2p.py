@@ -273,6 +273,8 @@ def peer(sock: socket.socket, id_peer):
 
     ## OBTEM OS METADADOS DO SEED
     sock_seed = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    inicio_download = time.perf_counter()
     sock_seed.connect((IP_ADDRESS, 9011))
 
     (file_size, block_size, num_chunks) = peer_receive_meta(sock_seed)
@@ -319,6 +321,14 @@ def peer(sock: socket.socket, id_peer):
 
             block_id, bloco_recebido = peer_receive_chunk(sock_bloco, i)
 
+        if i == (num_chunks - 1):
+            fim_download = time.perf_counter()
+
+        if type(block_id) is not int or block_id != i:
+            raise ValueError(
+                f"Bloco incorreto: solicitado {i}, recebido {block_id}"
+            )
+
         with chunks_lock:
             chunks[block_id] = bloco_recebido
 
@@ -332,30 +342,21 @@ def peer(sock: socket.socket, id_peer):
                 print("[Seed] Não foi possível registrar o bloco no tracker")
                 exit(1)
 
-        print(
-            f"[Peer {id_peer}] Bloco {block_id} recebido de "
-            f"{seeder_escolhido['peer_id']}"
-        )
+    tempo_download = fim_download - inicio_download
+    print(f"[Peer {id_peer}] Download conferido: {file_size} bytes em {tempo_download:.6f} segundos", flush=True)
 
-    print(f"[Peer {id_peer}] Arquivo baixado!")
+    with chunks_lock:
+        blocos_faltando = [i for i in range(num_chunks) if i not in chunks]
 
-def peer_novo(sock: socket.socket, id_peer):
-    # chunks = {}
-    
-    # ## CLIENTE
-    # print(f"[Peer {id_peer}] iniciado")
+        total_bytes = sum(len(bloco) for bloco in chunks.values())
 
-    # sock.connect((IP_ADDRESS, 9012))
-    # block_id, bloco_recebido = peer_receive_chunk(sock, 5)
+    if blocos_faltando:
+        raise ValueError(f"Blocos faltando: {blocos_faltando}")
 
-    # print(block_id, len(bloco_recebido))
-    # chunks[block_id] = bloco_recebido 
+    if total_bytes != file_size:
+        raise ValueError(f"Tamanho incorreto: esperado {file_size} bytes, recebido {total_bytes} bytes")
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as teste:
-        teste.connect((IP_ADDRESS, 9010))
-        send_msg(teste, {"op": "GET_OWNERS", "peer_id": "1", "block_id": 0})
-        _, resposta, _ = receive_msg(teste)
-        print(resposta)
+    print(f"[Peer {id_peer}] Arquivo baixado e conferido: {num_chunks} blocos, {total_bytes} bytes")
 
 def tracker(sock: socket.socket):
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -477,15 +478,5 @@ if "__main__" == __name__:
             exit(1)
         else:
             peer(sock, sys.argv[2])
-    elif argv[0] == "--peer-recebimento":
-        if len(argv) < 2:
-            print("Erro: É necessário informar o id do cliente")
-            exit(1)
-        else:
-            peer_novo(sock, sys.argv[2])
     elif argv[0] == "--tracker":
         tracker(sock)
-
-    
-
-    
