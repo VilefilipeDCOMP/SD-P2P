@@ -3,7 +3,7 @@ import logging
 import os
 
 
-from utils_cs1_csa import send_json, recv_json, send_file_chunks
+from utils_cs1_csA import send_json, recv_json, send_file_chunks
 
 logging.basicConfig(
     level=logging.INFO,
