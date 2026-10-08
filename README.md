@@ -2,11 +2,17 @@
 
 ## P2P
 
-Para rodar o experimento, rode nessa ordem
+Na pasta `SD-P2P`, gere os arquivos antes de rodar o experimento:
+
+```bash
+python gerar_arquivos.py
+```
+
+Depois, rode nessa ordem:
 
 ```bash
 python p2p.py --tracker
-python p2p.py --seed arquivos_teste/arquivo_5MB.bin
+python p2p.py --seed arquivos/arquivo_5mb.bin
 python p2p.py --peer 1
 python p2p.py --peer 2
 python p2p.py --peer 3
