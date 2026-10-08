@@ -12,9 +12,10 @@ FILES_DIR = "./arquivos"
 HOST = "127.0.0.1"
 
 SERVIDORES = {
-    "v1": {"script": "servidor_v1.py", "porta": 9001},
-    "v2": {"script": "servidor_v2.py", "porta": 9002},
-    "v3": {"script": "servidor_v3.py", "porta": 9003},
+    "v1": {"script": "servidor_v1.py", "porta": 9001, "tipo": "cs"},
+    "v2": {"script": "servidor_v2.py", "porta": 9002, "tipo": "cs"},
+    "v3": {"script": "servidor_v3.py", "porta": 9003, "tipo": "cs"},
+    "p2p": {"tipo": "p2p"},
 }
 
 TAMANHOS = {
@@ -57,6 +58,8 @@ def esperar_servidor(porta, processo, tentativas=100):
 
 
 def parar_servidor(processo):
+    if processo is None:
+        return
     processo.terminate()
     try:
         processo.wait(timeout=5)
@@ -68,40 +71,110 @@ def parar_servidor(processo):
 def executar_cenario(writer, f, chave_srv, nome_tam, qtd, rep):
     srv = SERVIDORES[chave_srv]
     tam = TAMANHOS[nome_tam]
+    caminho_arquivo = os.path.join(FILES_DIR, tam["arquivo"])
 
-    servidor = subprocess.Popen([PYTHON, srv["script"]],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        esperar_servidor(srv["porta"], servidor)
+    if srv["tipo"] == "cs":
+        servidor = subprocess.Popen([PYTHON, srv["script"]],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            esperar_servidor(srv["porta"], servidor)
 
-        clientes = [
-            subprocess.Popen(
-                [PYTHON, "cliente_cs.py", "--host", HOST, "--port", str(srv["porta"]),
-                 "--file", tam["arquivo"], "--esperado", str(tam["bytes"]), "--json"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-            for _ in range(qtd)
-        ]
+            clientes = [
+                subprocess.Popen(
+                    [PYTHON, "cliente_cs.py", "--host", HOST, "--port", str(srv["porta"]),
+                     "--file", tam["arquivo"], "--esperado", str(tam["bytes"]), "--json", "--descartar-em-ram"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                for _ in range(qtd)
+            ]
 
-        for id_cliente, proc in enumerate(clientes, start=1):
-            saida, _ = proc.communicate()
-            try:
-                r = json.loads(saida.strip().splitlines()[-1])
-            except (ValueError, IndexError):
-                r = {"ok": False, "tempo_s": None, "bytes_recebidos": 0,
-                     "erro": "cliente não devolveu JSON"}
-            writer.writerow([
-                srv["script"], nome_tam, qtd, rep, id_cliente,
-                f"{r['tempo_s']:.6f}" if r.get("tempo_s") is not None else "",
-                r["ok"], r.get("bytes_recebidos", 0), r.get("erro") or "",
-            ])
-            f.flush()
-    finally:
-        parar_servidor(servidor)
-        time.sleep(0.5)
+            for id_cliente, proc in enumerate(clientes, start=1):
+                saida, _ = proc.communicate()
+                try:
+                    r = json.loads(saida.strip().splitlines()[-1])
+                except (ValueError, IndexError):
+                    r = {"ok": False, "tempo_s": None, "bytes_recebidos": 0,
+                         "erro": "cliente não devolveu JSON"}
+                writer.writerow([
+                    srv["script"], nome_tam, qtd, rep, id_cliente,
+                    f"{r['tempo_s']:.6f}" if r.get("tempo_s") is not None else "",
+                    r["ok"], r.get("bytes_recebidos", 0), r.get("erro") or "",
+                ])
+                f.flush()
+        finally:
+            parar_servidor(servidor)
+            time.sleep(0.5)
+
+    elif srv["tipo"] == "p2p":
+        tracker_proc = subprocess.Popen([PYTHON, "p2p.py", "--tracker"],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        seed_proc = None
+        try:
+            time.sleep(1)
+            
+            seed_proc = subprocess.Popen([PYTHON, "-u", "p2p.py", "--seed", caminho_arquivo],
+                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+            while True:
+                linha = seed_proc.stdout.readline()
+                if not linha:
+                    print("Seed fechou inesperadamente!", flush=True)
+                    break
+                print("DEBUG SEED:", linha.strip(), flush=True)
+                if "Chunks registrados no tracker!" in linha:
+                    break
+            
+            clientes = []
+            for id_peer in range(1, qtd + 1):
+                out_path = f"peer_{id_peer}.log"
+                open(out_path, "w").close()
+                proc = subprocess.Popen(
+                    [PYTHON, "-u", "p2p.py", "--peer", str(id_peer)],
+                    stdout=open(out_path, "a"), stderr=subprocess.DEVNULL)
+                clientes.append((proc, out_path))
+
+            resultados = {}
+            while len(resultados) < qtd:
+                for id_cliente, (proc, out_path) in enumerate(clientes, start=1):
+                    if id_cliente in resultados:
+                        continue
+                    with open(out_path, "r") as f_log:
+                        for linha in f_log:
+                            if linha.startswith("RESULTADO "):
+                                try:
+                                    p2p_res = json.loads(linha[10:])
+                                    r = {
+                                        "ok": p2p_res.get("sucesso", False),
+                                        "tempo_s": p2p_res.get("tempo_segundos"),
+                                        "bytes_recebidos": p2p_res.get("file_size", 0),
+                                        "erro": ""
+                                    }
+                                except json.JSONDecodeError:
+                                    r = {"ok": False, "tempo_s": None, "bytes_recebidos": 0, "erro": "erro ao parsear JSON"}
+                                resultados[id_cliente] = r
+                                break
+                time.sleep(0.5)
+
+            for proc, _ in clientes:
+                proc.terminate()
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+                
+            for id_cliente in range(1, qtd + 1):
+                r = resultados.get(id_cliente, {"ok": False, "tempo_s": None, "bytes_recebidos": 0, "erro": "sem resultado"})
+                writer.writerow([
+                    "p2p.py", nome_tam, qtd, rep, id_cliente,
+                    f"{r['tempo_s']:.6f}" if r.get("tempo_s") is not None else "",
+                    r["ok"], r.get("bytes_recebidos", 0), r.get("erro") or "",
+                ])
+                f.flush()
+        finally:
+            parar_servidor(seed_proc)
+            parar_servidor(tracker_proc)
+            time.sleep(0.5)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Benchmark C/S (V1, V2, V3)")
+    ap = argparse.ArgumentParser(description="Benchmark C/S (V1, V2, V3) e P2P")
     ap.add_argument("--servidores", nargs="+", choices=SERVIDORES, default=list(SERVIDORES))
     ap.add_argument("--tamanhos", nargs="+", choices=TAMANHOS, default=list(TAMANHOS))
     ap.add_argument("--clientes", nargs="+", type=int, default=QTD_CLIENTES)
@@ -126,7 +199,8 @@ def main():
                 for qtd in args.clientes:
                     for rep in range(1, args.reps + 1):
                         feito += 1
-                        print(f"[{feito}/{total}] {SERVIDORES[chave]['script']} | {nome_tam} | "
+                        script_nome = SERVIDORES[chave].get("script", "p2p.py")
+                        print(f"[{feito}/{total}] {script_nome} | {nome_tam} | "
                               f"{qtd} cliente(s) | repetição {rep}/{args.reps}", flush=True)
                         executar_cenario(writer, f, chave, nome_tam, qtd, rep)
 
